@@ -1,0 +1,113 @@
+# ============================================================================
+# Translated from: ci.yml
+# ============================================================================
+#
+#
+# TRIGGERS: Configure in Buildkite UI → Pipeline Settings → GitHub
+#   - Push to branches: master, develop, 4.x, 5.x, 5.0
+#   - Pull requests: enabled
+#   - Manual builds: "New Build" button
+#
+# PATH FILTERING: This pipeline uses if_changed to skip builds when only
+# markdown files change (equivalent to GHA paths-ignore: '*.md')
+#
+# CONCURRENCY: Enable "Cancel Intermediate Builds" in Pipeline Settings
+# to replicate GHA's cancel-in-progress behavior
+#
+# PERMISSIONS: The original workflow required:
+#   - contents: read (automatic via Git checkout)
+#   - checks: write (for coverage step - configure GitHub token on agent)
+#
+# ============================================================================
+# AGENT CONFIGURATION REQUIRED
+# ============================================================================
+# The original workflow used the following GitHub Actions runners:
+#
+#   Job                  | runs-on
+#   ---------------------|----------------
+#   lint                 | ubuntu-latest
+#   test                 | matrix: [ubuntu-latest, windows-latest]
+#   coverage             | ubuntu-latest
+#
+# You must configure Buildkite agents to handle these workloads. Add an
+# `agents` block to each step once your queues are set up. Example:
+#
+#   agents:
+#     queue: "linux"
+#
+# Required tools on agents: Node.js (LTS and versions 18-26), npm, lcov
+# Alternatively, use the Docker plugin with appropriate Node.js images.
+# ============================================================================
+
+steps:
+  - group: ":test_tube: Lint & Test"
+    key: "lint-and-test"
+    if_changed:
+      include:
+        - "**/*"
+      exclude:
+        - "**.md"
+    steps:
+      - label: ":mag: Lint"
+        key: "lint"
+        # Assumes Node.js LTS is installed on the agent.
+        # If not available, use the Docker plugin:
+        #   plugins:
+        #     - docker:
+        #         image: "node:lts"
+        command:
+          - npm install --ignore-scripts --include=dev
+          - npm run lint
+
+      - label: ":nodejs: Test Node.js {{matrix.node_version}} - {{matrix.os}}"
+        key: "test"
+        # Assumes Node.js versions 18-26 are installed on the agent.
+        # If not available, use the Docker plugin:
+        #   plugins:
+        #     - docker:
+        #         image: "node:{{matrix.node_version}}"
+        command: |
+          npm config set loglevel error
+          npm install
+          echo "--- :nodejs: Node and NPM versions"
+          echo "Node.js version: $$(node -v)"
+          echo "NPM version: $$(npm -v)"
+          echo "--- :test_tube: Running tests"
+          npm run test-ci
+        artifact_paths:
+          - "coverage/lcov.info"
+        matrix:
+          setup:
+            os:
+              - "linux"
+              - "windows"
+            node_version:
+              - "18"
+              - "19"
+              - "20"
+              - "21"
+              - "22"
+              - "23"
+              - "24"
+              - "25"
+              - "26"
+
+  - wait
+
+  - label: ":bar_chart: Merge Coverage Reports"
+    key: "coverage"
+    depends_on:
+      - step: "test"
+        allow_failure: false
+    # Requires lcov to be installed on the agent
+    command: |
+      mkdir -p ./coverage
+      buildkite-agent artifact download "coverage/lcov.info" ./coverage --step "test"
+      
+      echo "--- :mag: Merging coverage reports"
+      find ./coverage -name lcov.info -exec printf '-a %q\n' {} \; | xargs lcov -o ./lcov.info
+      
+      echo "--- :arrow_up: Uploading to Coveralls"
+      # NOTE: Configure COVERALLS_REPO_TOKEN as an environment variable on the agent
+      # or use the coveralls plugin if available
+      npx coveralls < ./lcov.info
